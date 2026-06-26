@@ -1,0 +1,30 @@
+# umans-throttle example configuration
+#
+# Copy to config.toml and edit. All fields shown with defaults.
+
+[upstream]
+# The Umans Code API base URL.
+base_url = "https://api.code.umans.ai"
+
+[server]
+# Address to listen on. 127.0.0.1 binds locally only.
+listen = "127.0.0.1:8080"
+# Grace period for in-flight requests after SIGINT/SIGTERM before forced exit.
+# The proxy stops accepting new connections immediately, then waits up to this
+# long for active streams to finish.
+shutdown_timeout = "30s"
+
+[throttle]
+# Max concurrent in-flight requests forwarded to upstream.
+# Code Max plan = 4, Code Pro plan = 3.
+# Set to the soft cap so you never trigger a 429.
+max_in_flight = 4
+
+# How long a request may wait in the queue before we reject it (503).
+# The client sees 503 + Retry-After and can retry on its own.
+max_wait = "5m"
+
+# Safety net: if no bytes arrive from upstream within this window while
+# streaming, abort the stream and release the permit. Prevents a hung
+# upstream from permanently occupying a slot.
+idle_timeout = "2m"

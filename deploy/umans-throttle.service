@@ -1,0 +1,38 @@
+[Unit]
+Description=umans-throttle — throttling reverse proxy for Umans Code API
+Documentation=https://github.com/Clouder0/umans-throttle
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Adjust the binary path and config path to your install location.
+ExecStart=/usr/local/bin/umans-throttle --config /etc/umans-throttle/config.toml
+
+# Graceful shutdown: SIGTERM triggers drain (up to shutdown_timeout in config),
+# then systemd's TimeoutStopSec forces kill.
+KillSignal=SIGTERM
+TimeoutStopSec=35
+
+# Restart on crash, but not on clean exit.
+Restart=on-failure
+RestartSec=2
+
+# Run as a dedicated user with no login shell.
+User=umans-throttle
+Group=umans-throttle
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/umans-throttle
+
+# Environment
+Environment=RUST_LOG=info
+# Environment=UMANS_THROTTLE_CONFIG=/etc/umans-throttle/config.toml
+
+[Install]
+WantedBy=multi-user.target

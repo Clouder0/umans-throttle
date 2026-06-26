@@ -1,0 +1,48 @@
+[package]
+name = "umans-throttle"
+version = "0.1.0"
+edition = "2021"
+description = "Throttling reverse proxy for the Umans Code API — cap concurrency, queue overflow, stream transparently."
+license = "MIT"
+repository = "https://github.com/Clouder0/umans-throttle"
+
+[[bin]]
+name = "umans-throttle"
+path = "src/main.rs"
+
+[lib]
+name = "umans_throttle"
+path = "src/lib.rs"
+
+[dependencies]
+axum = { version = "0.8", features = ["http2"] }
+reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls", "http2"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["limit"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+bytes = "1"
+futures-core = "0.3"
+humantime-serde = "1"
+thiserror = "2"
+tracing = { version = "0.1", features = ["release_max_level_info"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive", "env"] }
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls", "http2"] }
+tokio = { version = "1", features = ["full", "test-util"] }
+futures-util = "0.3"
+parking_lot = "0.12"
+tokio-stream = "0.1"
+humantime = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
