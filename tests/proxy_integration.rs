@@ -44,6 +44,14 @@ impl<'a> MakeWriter<'a> for CapturedLogs {
     }
 }
 
+fn captured_log_subscriber(logs: CapturedLogs) -> impl tracing::Subscriber + Send + Sync {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_ansi(false)
+        .with_writer(logs)
+        .finish()
+}
+
 #[tokio::test]
 async fn concurrency_limit_enforced() {
     // max_in_flight = 2. Fire 4 concurrent requests, each holding the upstream
@@ -352,10 +360,7 @@ async fn upstream_error_status_passthrough() {
 #[tokio::test(flavor = "current_thread")]
 async fn emits_minimal_raw_events_for_upstream_429() {
     let logs = CapturedLogs::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .with_writer(logs.clone())
-        .finish();
+    let subscriber = captured_log_subscriber(logs.clone());
     let _guard = tracing::subscriber::set_default(subscriber);
 
     let mock = MockUpstream::start_error(StatusCode::TOO_MANY_REQUESTS).await;
@@ -390,10 +395,7 @@ async fn emits_minimal_raw_events_for_upstream_429() {
 #[tokio::test(flavor = "current_thread")]
 async fn emits_queue_timeout_event_without_upstream_request() {
     let logs = CapturedLogs::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .with_writer(logs.clone())
-        .finish();
+    let subscriber = captured_log_subscriber(logs.clone());
     let _guard = tracing::subscriber::set_default(subscriber);
 
     let mock = MockUpstream::start_hold().await;
@@ -482,10 +484,7 @@ async fn release_grace_delays_next_upstream_request_without_delaying_response_bo
 #[tokio::test(flavor = "current_thread")]
 async fn release_grace_emits_scheduled_and_released_events() {
     let logs = CapturedLogs::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .with_writer(logs.clone())
-        .finish();
+    let subscriber = captured_log_subscriber(logs.clone());
     let _guard = tracing::subscriber::set_default(subscriber);
 
     let mock = MockUpstream::start_echo().await;
@@ -533,10 +532,7 @@ async fn release_grace_emits_scheduled_and_released_events() {
 #[tokio::test(flavor = "current_thread")]
 async fn upstream_429_triggers_remote_usage_sample_event() {
     let logs = CapturedLogs::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .with_writer(logs.clone())
-        .finish();
+    let subscriber = captured_log_subscriber(logs.clone());
     let _guard = tracing::subscriber::set_default(subscriber);
 
     let mock = MockUpstream::start_429_with_usage().await;
