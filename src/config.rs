@@ -24,6 +24,8 @@ pub struct Config {
     pub upstream: UpstreamConfig,
     pub server: ServerConfig,
     pub throttle: ThrottleConfig,
+    #[serde(default)]
+    pub observability: ObservabilityConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -51,6 +53,28 @@ pub struct ThrottleConfig {
     /// and release the permit. Safety net against hung upstreams.
     #[serde(with = "humantime_serde", default = "default_idle_timeout")]
     pub idle_timeout: Duration,
+    /// Delay between a local upstream response ending and releasing the permit.
+    /// This absorbs small upstream account-counter lag without adding client
+    /// response latency.
+    #[serde(with = "humantime_serde", default = "default_release_grace")]
+    pub release_grace: Duration,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ObservabilityConfig {
+    /// When to sample the upstream account usage endpoint.
+    #[serde(default)]
+    pub usage_sampling: UsageSampling,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageSampling {
+    Off,
+    #[default]
+    #[serde(rename = "on_429")]
+    #[serde(alias = "on429")]
+    On429,
 }
 
 fn default_max_wait() -> Duration {
@@ -59,6 +83,10 @@ fn default_max_wait() -> Duration {
 
 fn default_idle_timeout() -> Duration {
     Duration::from_secs(120)
+}
+
+fn default_release_grace() -> Duration {
+    Duration::from_millis(250)
 }
 
 fn default_shutdown_timeout() -> Duration {
@@ -71,6 +99,15 @@ impl Default for ThrottleConfig {
             max_in_flight: 4,
             max_wait: default_max_wait(),
             idle_timeout: default_idle_timeout(),
+            release_grace: default_release_grace(),
+        }
+    }
+}
+
+impl Default for ObservabilityConfig {
+    fn default() -> Self {
+        Self {
+            usage_sampling: UsageSampling::On429,
         }
     }
 }

@@ -97,7 +97,21 @@ listen = "127.0.0.1:8080"
 max_in_flight = 4      # Code Max=4, Code Pro=3
 max_wait = "5m"        # queue timeout
 idle_timeout = "2m"    # no-bytes → abort (safety net)
+release_grace = "250ms" # absorb upstream account-counter lag
+
+[observability]
+usage_sampling = "on_429" # sample /v1/usage after upstream 429
 ```
+
+## Raw Tracing
+
+The proxy emits minimal structured events for `/v1/messages`: request received,
+permit acquired, upstream headers, permit release scheduled, permit released,
+queue timeout, upstream send/stream errors, and 429-triggered usage sampling.
+Logs intentionally omit auth headers, request bodies, and arbitrary user
+headers. Local counters split the throttle state into `active_in_flight`,
+`grace_pending`, `held_permits`, `available_permits`, and `queued` so a 429 near
+release can be attributed to either active work or the grace window.
 
 ## Dependencies
 

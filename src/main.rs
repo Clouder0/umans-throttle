@@ -51,6 +51,8 @@ fn main() {
         max_in_flight = config.throttle.max_in_flight,
         max_wait = ?config.throttle.max_wait,
         idle_timeout = ?config.throttle.idle_timeout,
+        release_grace = ?config.throttle.release_grace,
+        usage_sampling = ?config.observability.usage_sampling,
         "throttle config"
     );
 

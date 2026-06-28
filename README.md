@@ -94,9 +94,17 @@ shutdown_timeout = "30s"  # drain in-flight after SIGTERM, then force exit
 max_in_flight = 4      # Code Max=4, Code Pro=3
 max_wait = "5m"        # queue timeout -> 503 + Retry-After
 idle_timeout = "2m"    # no-bytes -> abort (safety net)
+release_grace = "250ms" # hold permit briefly after local completion
+
+[observability]
+usage_sampling = "on_429" # sample /v1/usage after upstream 429
 ```
 
 Durations use [humantime](https://docs.rs/humantime) format: `"5m"`, `"30s"`, `"2m"`, `"1h"`.
+Raw tracing is emitted as structured `tracing` events on `/v1/messages` at the
+request, permit, upstream-header, release-scheduled, release, queue-timeout, and
+429 usage-sampling points. Counters distinguish `active_in_flight` from
+`grace_pending`; `held_permits` is the actual semaphore occupancy.
 
 ## How It Works
 
@@ -109,10 +117,11 @@ structure — the semaphore's internal FIFO waiter list *is* the queue.
 
 ### Permit lifecycle (the core invariant)
 
-The permit is held for the entire duration the upstream request is in-flight:
+The permit is held for the entire duration the upstream request is in-flight,
+plus `release_grace` if configured:
 
 ```
-acquire permit → send to upstream → stream response body → [stream ends] → release permit
+acquire permit → send to upstream → stream response body → [stream ends] → optional release_grace → release permit
 ```
 
 RAII via `OwnedSemaphorePermit`: the permit moves into a custom `PermitBody`

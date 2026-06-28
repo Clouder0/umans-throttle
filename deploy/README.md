@@ -47,6 +47,10 @@ shutdown_timeout = "30s"
 max_in_flight = 4
 max_wait = "5m"
 idle_timeout = "2m"
+release_grace = "250ms"
+
+[observability]
+usage_sampling = "on_429"
 ```
 
 **Important:** `max_in_flight` must match your Umans plan. Setting it higher

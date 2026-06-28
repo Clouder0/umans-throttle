@@ -28,3 +28,13 @@ max_wait = "5m"
 # streaming, abort the stream and release the permit. Prevents a hung
 # upstream from permanently occupying a slot.
 idle_timeout = "2m"
+
+# After an upstream response ends locally, hold the permit briefly before
+# releasing it. This absorbs small upstream account-counter lag without adding
+# client response latency. Set to "0ms" to disable.
+release_grace = "250ms"
+
+[observability]
+# Sample /v1/usage asynchronously after an upstream 429 so logs include the
+# upstream account-level concurrency view. Values: "off", "on_429".
+usage_sampling = "on_429"

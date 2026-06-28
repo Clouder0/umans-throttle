@@ -6,10 +6,43 @@
 
 mod common;
 
+use std::io;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::{spawn_proxy, MockUpstream};
+use common::{spawn_proxy, spawn_proxy_with_options, MockUpstream};
 use http::StatusCode;
+use tracing_subscriber::fmt::MakeWriter;
+
+#[derive(Clone, Default)]
+struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+impl CapturedLogs {
+    fn output(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
+
+struct CapturedWriter(Arc<Mutex<Vec<u8>>>);
+
+impl io::Write for CapturedWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> MakeWriter<'a> for CapturedLogs {
+    type Writer = CapturedWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        CapturedWriter(self.0.clone())
+    }
+}
 
 #[tokio::test]
 async fn concurrency_limit_enforced() {
@@ -314,6 +347,240 @@ async fn upstream_error_status_passthrough() {
         StatusCode::BAD_GATEWAY,
         "upstream HTTP error status should pass through"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn emits_minimal_raw_events_for_upstream_429() {
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(logs.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let mock = MockUpstream::start_error(StatusCode::TOO_MANY_REQUESTS).await;
+    let proxy = spawn_proxy(
+        &mock.url,
+        1,
+        Duration::from_secs(5),
+        Duration::from_secs(30),
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/v1/messages", proxy.url))
+        .body("x")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    let _ = resp.bytes().await;
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let output = logs.output();
+    assert!(output.contains("event=\"request_received\""), "{output}");
+    assert!(output.contains("event=\"permit_acquired\""), "{output}");
+    assert!(output.contains("event=\"upstream_headers\""), "{output}");
+    assert!(output.contains("status=429"), "{output}");
+    assert!(output.contains("event=\"permit_released\""), "{output}");
+    assert!(output.contains("reason=\"complete\""), "{output}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn emits_queue_timeout_event_without_upstream_request() {
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(logs.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let mock = MockUpstream::start_hold().await;
+    let proxy = spawn_proxy(
+        &mock.url,
+        1,
+        Duration::from_millis(100),
+        Duration::from_secs(30),
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    let hold = tokio::spawn({
+        let url = proxy.url.clone();
+        let c = client.clone();
+        async move {
+            c.post(format!("{url}/v1/messages"))
+                .body("hold")
+                .send()
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let resp = client
+        .post(format!("{}/v1/messages", proxy.url))
+        .body("queued")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    mock.release_n(1);
+    let _ = hold.await;
+
+    let output = logs.output();
+    assert!(output.contains("event=\"queue_timeout\""), "{output}");
+    assert!(output.contains("wait_ms="), "{output}");
+    assert!(output.contains("held_permits=1"), "{output}");
+    assert!(output.contains("active_in_flight=1"), "{output}");
+}
+
+#[tokio::test]
+async fn release_grace_delays_next_upstream_request_without_delaying_response_body() {
+    let mock = MockUpstream::start_echo().await;
+    let proxy = spawn_proxy_with_options(
+        &mock.url,
+        1,
+        Duration::from_secs(5),
+        Duration::from_secs(30),
+        Duration::from_millis(250),
+        "off",
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    let start = std::time::Instant::now();
+    let r1 = client
+        .post(format!("{}/v1/messages", proxy.url))
+        .body("a")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r1.status(), StatusCode::OK);
+    let _ = r1.text().await.unwrap();
+    assert!(
+        start.elapsed() < Duration::from_millis(200),
+        "release grace should not delay the completed client response"
+    );
+
+    let second_start = std::time::Instant::now();
+    let r2 = client
+        .post(format!("{}/v1/messages", proxy.url))
+        .body("b")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r2.status(), StatusCode::OK);
+    let second_elapsed = second_start.elapsed();
+    assert!(
+        second_elapsed >= Duration::from_millis(200),
+        "second request should wait for release grace, elapsed={second_elapsed:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn release_grace_emits_scheduled_and_released_events() {
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(logs.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let mock = MockUpstream::start_echo().await;
+    let proxy = spawn_proxy_with_options(
+        &mock.url,
+        1,
+        Duration::from_secs(5),
+        Duration::from_secs(30),
+        Duration::from_millis(150),
+        "off",
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/v1/messages", proxy.url))
+        .body("a")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let _ = resp.bytes().await;
+
+    let mut output = String::new();
+    for _ in 0..20 {
+        output = logs.output();
+        if output.contains("event=\"permit_released\"") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    assert!(
+        output.contains("event=\"permit_release_scheduled\""),
+        "{output}"
+    );
+    assert!(output.contains("release_grace_ms=150"), "{output}");
+    assert!(output.contains("grace_pending_after=1"), "{output}");
+    assert!(output.contains("active_in_flight_after=0"), "{output}");
+    assert!(output.contains("event=\"permit_released\""), "{output}");
+    assert!(output.contains("grace_pending_after=0"), "{output}");
+    assert!(output.contains("held_permits_after=0"), "{output}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn upstream_429_triggers_remote_usage_sample_event() {
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(logs.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let mock = MockUpstream::start_429_with_usage().await;
+    let proxy = spawn_proxy_with_options(
+        &mock.url,
+        1,
+        Duration::from_secs(5),
+        Duration::from_secs(30),
+        Duration::from_millis(0),
+        "on_429",
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/v1/messages", proxy.url))
+        .header("authorization", "Bearer sk-secret-for-test")
+        .body("x")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    let _ = resp.bytes().await;
+
+    let mut output = String::new();
+    for _ in 0..20 {
+        output = logs.output();
+        if output.contains("event=\"remote_usage_sample\"") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    assert!(output.contains("event=\"upstream_headers\""), "{output}");
+    assert!(
+        output.contains("upstream_request_id=\"upstream-test-id\""),
+        "{output}"
+    );
+    assert!(output.contains("event=\"remote_usage_sample\""), "{output}");
+    assert!(output.contains("remote_concurrent_sessions=7"), "{output}");
+    assert!(output.contains("remote_concurrency_limit=4"), "{output}");
+    assert!(output.contains("remote_concurrency_hard_cap=8"), "{output}");
+    assert!(output.contains("remote_priority_low=true"), "{output}");
+    assert!(!output.contains("sk-secret-for-test"), "{output}");
 }
 
 #[tokio::test]

@@ -13,7 +13,7 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::StatusCode;
-use axum::routing::any;
+use axum::routing::{any, get, post};
 use axum::Router;
 use bytes::Bytes;
 use futures_util::StreamExt;
@@ -74,6 +74,63 @@ impl MockState {
 }
 
 impl MockUpstream {
+    /// API-shaped mode: /v1/messages returns 429 and /v1/usage returns a
+    /// minimal account usage payload. Used to verify 429-triggered diagnostics.
+    pub async fn start_429_with_usage() -> Self {
+        let state = Arc::new(MockState::new());
+        let app = Router::new()
+            .route(
+                "/v1/messages",
+                post({
+                    let state = state.clone();
+                    move |req: Request| {
+                        let state = state.clone();
+                        async move {
+                            record_headers(&state, &req);
+                            state.enter();
+                            state.exit();
+                            (
+                                StatusCode::TOO_MANY_REQUESTS,
+                                [("retry-after", "1"), ("x-request-id", "upstream-test-id")],
+                                "rate limited",
+                            )
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/usage",
+                get({
+                    let state = state.clone();
+                    move |req: Request| {
+                        let state = state.clone();
+                        async move {
+                            record_headers(&state, &req);
+                            (
+                                StatusCode::OK,
+                                axum::Json(serde_json::json!({
+                                    "limits": {
+                                        "concurrency": {
+                                            "limit": 4,
+                                            "hard_cap": 8
+                                        }
+                                    },
+                                    "usage": {
+                                        "concurrent_sessions": 7,
+                                        "priority": {
+                                            "low": true
+                                        }
+                                    }
+                                })),
+                            )
+                        }
+                    }
+                }),
+            );
+        let url = serve(app).await;
+        Self { url, state }
+    }
+
     /// Hold mode: each request blocks until `release_n` releases it, then
     /// returns 200 "ok".
     pub async fn start_hold() -> Self {
@@ -260,6 +317,27 @@ pub async fn spawn_proxy(
     max_wait: Duration,
     idle_timeout: Duration,
 ) -> ProxyHandle {
+    spawn_proxy_with_options(
+        upstream_url,
+        max_in_flight,
+        max_wait,
+        idle_timeout,
+        Duration::from_millis(0),
+        "off",
+    )
+    .await
+}
+
+/// Spawn the real proxy pointed at `upstream_url`, with observability/throttle
+/// options used by targeted tests.
+pub async fn spawn_proxy_with_options(
+    upstream_url: &str,
+    max_in_flight: usize,
+    max_wait: Duration,
+    idle_timeout: Duration,
+    release_grace: Duration,
+    usage_sampling: &str,
+) -> ProxyHandle {
     let cfg_str = format!(
         r#"
 [upstream]
@@ -272,9 +350,14 @@ listen = "127.0.0.1:0"
 max_in_flight = {max_in_flight}
 max_wait = "{max_wait_str}"
 idle_timeout = "{idle_timeout_str}"
+release_grace = "{release_grace_str}"
+
+[observability]
+usage_sampling = "{usage_sampling}"
 "#,
         max_wait_str = humantime::format_duration(max_wait),
         idle_timeout_str = humantime::format_duration(idle_timeout),
+        release_grace_str = humantime::format_duration(release_grace),
     );
     let config = Config::parse_str(&cfg_str).unwrap();
     let state = AppState::new(&config);
